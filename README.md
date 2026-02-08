@@ -1,1 +1,9 @@
-# nifty-ai-dashboard
+streamlit
+streamlit-autorefresh
+yfinance
+pandas
+numpy
+mplfinance
+matplotlib
+vaderSentiment
+scikit-learn
