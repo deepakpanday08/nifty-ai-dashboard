@@ -2,127 +2,111 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import mplfinance as mpf
-from sklearn.ensemble import RandomForestClassifier
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
 import pytz
 import matplotlib.pyplot as plt
 
-# --- 1. SETTINGS & REFRESH ---
-st.set_page_config(page_title="Nifty AI Master", layout="wide", page_icon="🎯")
-st_autorefresh(interval=60 * 1000, key="live_sync") # 1-minute fast-track refresh
+# --- 1. CONFIG & REFRESH ---
+st.set_page_config(page_title="Nifty Global AI", layout="wide")
+st_autorefresh(interval=60 * 1000, key="global_sync")
 
-# Timezone Handling
 IST = pytz.timezone('Asia/Kolkata')
-now_ist = datetime.now(IST)
 
-# NSE Heavyweights (Impact Nifty by ~40%)
-HEAVYWEIGHTS = ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS"]
-
-# --- 2. DATA ENGINE ---
-@st.cache_data(ttl=60)
-def fetch_market_data():
-    # Primary Data
-    nifty = yf.download("^NSEI", interval="15m", period="5d", progress=False)
-    # Global/Gifty Nifty proxy (using pre-market index)
-    sp500 = yf.download("^GSPC", interval="15m", period="5d", progress=False)
+# --- 2. GLOBAL DATA ENGINE ---
+@st.cache_data(ttl=300)
+def get_global_pulse():
+    # US, Japan, Hong Kong, and Nifty
+    tickers = {
+        "NIFTY": "^NSEI",
+        "S&P 500": "^GSPC",
+        "NIKKEI 225": "^N225",
+        "HANG SENG": "^HSI"
+    }
     
-    # Flatten MultiIndex if yfinance returns it
-    for df in [nifty, sp500]:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] for col in df.columns]
-            
-    return nifty, sp500
-
-def get_weighted_sentiment():
-    analyzer = SentimentIntensityAnalyzer()
-    scores = []
-    # Scrape Nifty + Top 5 heavyweights for higher accuracy
-    for t in ["^NSEI"] + HEAVYWEIGHTS:
+    global_data = {}
+    for name, sym in tickers.items():
         try:
-            news = yf.Ticker(t).news
-            if news:
-                scores.append(analyzer.polarity_scores(news[0].get('title', ''))['compound'])
-        except: continue
-    return np.mean(scores) if scores else 0.0
-
-# --- 3. PATTERN & HERO-ZERO LOGIC ---
-def analyze_execution(df):
-    # Linear Regression Channel Calculation
-    y = df['Close'].values
-    x = np.arange(len(y))
-    slope, intercept = np.polyfit(x, y, 1)
-    center = slope * x + intercept
-    std = np.std(y - center)
-    
-    upper = center + (1.5 * std)
-    lower = center - (1.5 * std)
-    
-    current_price = df['Close'].iloc[-1]
-    
-    # Hero-Zero Logic (TUESDAY ONLY)
-    hero_signal = "WAITING"
-    # 1 = Tuesday
-    if now_ist.weekday() == 1 and now_ist.hour >= 13 and now_ist.minute >= 30:
-        strike = int(round(current_price / 50) * 50)
-        if current_price > upper[-1]:
-            hero_signal = f"🚀 HERO CALL: {strike} CE"
-        elif current_price < lower[-1]:
-            hero_signal = f"🩸 HERO PUT: {strike} PE"
+            df = yf.download(sym, period="2d", interval="15m", progress=False)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = [c[0] for c in df.columns]
             
-    return current_price, upper, lower, hero_signal
+            # Calculate % change from previous close
+            current = df['Close'].iloc[-1]
+            prev_close = df['Close'].iloc[0]
+            pct_change = ((current - prev_close) / prev_close) * 100
+            global_data[name] = {"price": current, "change": pct_change}
+        except:
+            global_data[name] = {"price": 0, "change": 0}
+            
+    return global_data
 
-# --- 4. DASHBOARD UI ---
-st.title("🏹 Nifty AI Execution Engine")
-st.write(f"IST Time: {now_ist.strftime('%H:%M:%S')} | Day: {now_ist.strftime('%A')}")
+def get_heavyweight_sentiment():
+    analyzer = SentimentIntensityAnalyzer()
+    weights = {"RELIANCE.NS": 0.10, "HDFCBANK.NS": 0.12, "ICICIBANK.NS": 0.08, "INFY.NS": 0.06, "ITC.NS": 0.05}
+    total_sentiment = 0
+    for stock, weight in weights.items():
+        try:
+            news = yf.Ticker(stock).news
+            if news:
+                score = analyzer.polarity_scores(news[0]['title'])['compound']
+                total_sentiment += score * weight
+        except: continue
+    return total_sentiment
 
-# Run Backend
-with st.spinner('Syncing with NSE Servers...'):
-    nifty, sp500 = fetch_market_data()
-    sentiment = get_weighted_sentiment()
-    ltp, up_band, lo_band, hero = analyze_execution(nifty)
+# --- 3. UI LAYOUT ---
+st.title("🌏 Nifty Global Multi-Market AI")
 
-# Metrics Row
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("NIFTY 50", f"{ltp:.2f}")
-m2.metric("Heavyweight Sentiment", f"{sentiment:+.2f}")
-m3.metric("Channel Status", "Overbought" if ltp > up_band[-1] else "Oversold" if ltp < lo_band[-1] else "Neutral")
-m4.metric("Market Bias", "BULLISH" if sentiment > 0.1 else "BEARISH" if sentiment < -0.1 else "SIDEWAYS")
+# Sidebar: Market Sentiment Meter
+global_stats = get_global_pulse()
+hw_sentiment = get_heavyweight_sentiment()
 
-# --- SIGNAL & HERO-ZERO PANEL ---
-col_sig, col_hero = st.columns(2)
+# Calculate Global Bias Score
+# (Weightage: US 40%, Japan 30%, HK 30%)
+global_bias = (global_stats['S&P 500']['change'] * 0.4) + \
+              (global_stats['NIKKEI 225']['change'] * 0.3) + \
+              (global_stats['HANG SENG']['change'] * 0.3)
+
+# --- DISPLAY SECTION ---
+st.subheader("🌐 Global Market Dashboard (Asian & US Lead)")
+cols = st.columns(4)
+cols[0].metric("S&P 500 (USA)", f"{global_stats['S&P 500']['change']:+.2f}%")
+cols[1].metric("NIKKEI 225 (JPN)", f"{global_stats['NIKKEI 225']['change']:+.2f}%")
+cols[2].metric("HANG SENG (HKG)", f"{global_stats['HANG SENG']['change']:+.2f}%")
+cols[3].metric("GLOBAL BIAS SCORE", f"{global_bias:+.2f}")
+
+# --- AI SIGNAL ENGINE ---
+st.divider()
+st.subheader("🎯 Nifty 50 Execution Signal")
+
+# Fetch Nifty for Patterns
+nifty_df = yf.download("^NSEI", interval="15m", period="5d", progress=False)
+if isinstance(nifty_df.columns, pd.MultiIndex): nifty_df.columns = [c[0] for c in nifty_df.columns]
+
+# Signal Logic: Global Bias + Local Heavyweight News + Price Action
+ltp = nifty_df['Close'].iloc[-1]
+rsi = 100 - (100 / (1 + (nifty_df['Close'].diff().rolling(14).mean() / (-nifty_df['Close'].diff().rolling(14).mean() + 1e-9))))
+
+col_sig, col_details = st.columns([1, 2])
 
 with col_sig:
-    st.subheader("🎯 Trade Execution")
-    if ltp > up_band[-1] and sentiment > 0:
-        st.success(f"**SIGNAL: BUY/CALL ENTRY**\n\nTarget: {ltp + 45} | SL: {ltp - 20}")
-    elif ltp < lo_band[-1] and sentiment < 0:
-        st.error(f"**SIGNAL: SELL/PUT ENTRY**\n\nTarget: {ltp - 45} | SL: {ltp + 20}")
+    if global_bias > 0.3 and hw_sentiment > 0:
+        st.success("🔥 SIGNAL: STRONG BUY")
+        st.write("**Reason:** Global Asian markets & US are green + Heavyweight news is positive.")
+    elif global_bias < -0.3 and hw_sentiment < 0:
+        st.error("📉 SIGNAL: STRONG SELL")
+        st.write("**Reason:** Global Asian drag + US weakness + Negative local news.")
     else:
-        st.warning("⚖️ **NO TRADE ZONE**: Wait for Channel Breakout + Sentiment Sync.")
+        st.warning("⚖️ SIGNAL: NEUTRAL")
+        st.write("**Reason:** Mixed global signals. Avoid aggressive entry.")
 
-with col_hero:
-    st.subheader("⚡ Tuesday Hero-Zero")
-    if now_ist.weekday() == 1:
-        if "WAITING" in hero:
-            st.info("Logic active after 01:30 PM on Expiry Day (Tuesday).")
-        else:
-            st.warning(f"🔥 **{hero}**")
-            st.caption("Low capital high-risk trade. Suggested entry ₹5-₹10.")
-    else:
-        st.write("Inactive (Only active on Tuesdays).")
+with col_details:
+    st.info(f"**Heavyweight News Impact:** {hw_sentiment:+.2f}")
+    st.write(f"**Nifty RSI:** {rsi.iloc[-1]:.1f}")
+    if abs(global_bias) > 0.5:
+        st.markdown("⚠️ **High Volatility Alert:** Global markets are moving sharply.")
 
-# --- CHARTING ---
-st.subheader("📊 15-Minute Linear Regression Channel")
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(nifty.index, nifty['Close'], label="Price", color='#1f77b4', linewidth=2)
-ax.plot(nifty.index, up_band, '--', color='red', alpha=0.6, label="Resistance")
-ax.plot(nifty.index, lo_band, '--', color='green', alpha=0.6, label="Support")
-ax.fill_between(nifty.index, lo_band, up_band, color='gray', alpha=0.1)
-plt.legend()
+# Simple Trend Chart
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(nifty_df.index, nifty_df['Close'], label="Nifty 15m")
+plt.title("Nifty Intraday Trend")
 st.pyplot(fig)
-
-st.divider()
-st.caption("Disclaimer: AI analysis is for educational purposes. Always verify with your financial advisor before trading.")
