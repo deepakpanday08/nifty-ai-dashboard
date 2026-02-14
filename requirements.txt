@@ -1,10 +1,8 @@
 streamlit
-streamlit-autorefresh
+plotly
 yfinance
 pandas
 numpy
-mplfinance
-matplotlib
 vaderSentiment
-scikit-learn
+streamlit-autorefresh
 pytz
