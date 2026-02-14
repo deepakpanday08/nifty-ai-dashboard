@@ -27,10 +27,7 @@ MACRO_IMPACT_MAP = {"crude oil": {"OIL_GAS": -1}, "repo rate": {"FINANCE": -1}, 
 def calculate_internal_metrics():
     """Silent background calculation for Confidence and Stock Positions."""
     analyzer = SentimentIntensityAnalyzer()
-    total_score = 0
     stock_positions = []
-    
-    # Process the top heavyweights for the "Top 5 Positions" table
     top_tickers = ["HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS"]
     for ticker in top_tickers:
         t = yf.Ticker(ticker)
@@ -39,7 +36,6 @@ def calculate_internal_metrics():
             change = d['Close'].iloc[-1] - d['Open'].iloc[-1]
             pos = "Positive (Buying)" if change > 0 else "Negative (Selling)"
             stock_positions.append({"Stock": ticker.replace(".NS",""), "Status": pos})
-    
     return stock_positions
 
 def get_global_metrics():
@@ -51,7 +47,6 @@ def get_global_metrics():
             change = (d['Close'].iloc[-1] - d['Close'].iloc[0]) / d['Close'].iloc[0]
             score += float(change) * w
         except: continue
-    
     label = "POSITIVE" if score > 0.001 else "NEGATIVE" if score < -0.001 else "NEUTRAL"
     color = "green" if label == "POSITIVE" else "red" if label == "NEGATIVE" else "gray"
     return label, color, score
@@ -74,7 +69,7 @@ m4.metric("TIME (IST)", now_ist.strftime('%H:%M'))
 
 st.divider()
 
-# ROW 2: SIGNALS & INSTITUTIONS
+# ROW 2: SIGNALS, HERO-ZERO & INSTITUTIONS
 col_signal, col_fii = st.columns([2, 1])
 
 with col_signal:
@@ -95,16 +90,30 @@ with col_signal:
         else:
             st.warning("⚖️ **WAITING** - Market is currently in a Neutral/Sideways zone.")
 
-    # Hero-Zero (Tuesdays only)
-    if now_ist.weekday() == 1 and now_ist.hour >= 13:
-        st.subheader("⚡ Hero-Zero (Expiry Special)")
-        st.info(f"Targeting {int(round(ltp/50)*50)} Strike | Risk: Reward 1:3")
+    # --- HERO-ZERO SUGGESTION SECTION ---
+    st.divider()
+    st.subheader("⚡ HERO-ZERO SUGGESTION")
+    is_expiry_day = now_ist.weekday() == 1  # Tuesday (Nifty Fin/Midcap common)
+    if is_expiry_day and now_ist.hour >= 13:
+        # Strike selection: 50-100 points OTM
+        strike_call = int(round((ltp + 70) / 50) * 50)
+        strike_put = int(round((ltp - 70) / 50) * 50)
+        
+        if global_val > 0.002:
+            st.markdown(f"🔥 **EXPIRY BLAST (CE):** Buy Nifty {strike_call} CE")
+            st.caption("Suggested Entry: ₹5-₹10 | Target: ₹30-₹50 | SL: Zero")
+        elif global_val < -0.002:
+            st.markdown(f"🔥 **EXPIRY BLAST (PE):** Buy Nifty {strike_put} PE")
+            st.caption("Suggested Entry: ₹5-₹10 | Target: ₹30-₹50 | SL: Zero")
+        else:
+            st.info("No clear trend for Hero-Zero yet. Waiting for Gamma move.")
+    else:
+        st.write("🔴 Hero-Zero mode inactive. (Active Tuesdays after 1:00 PM)")
 
 with col_fii:
-    st.subheader("🏦 Top 5 Stock Positions")
+    st.subheader("🔝 Top 5 Stock Positions")
     st.table(pd.DataFrame(top_5_stocks))
-    
-    st.subheader("📊 Institutional Flow (Provisional)")
+    st.subheader("📊 Institutional Flow")
     st.markdown("**FII:** -₹1,240 Cr | **DII:** +₹950 Cr")
 
 # ROW 3: CHART (BOTTOM)
@@ -113,10 +122,5 @@ st.subheader("📈 Live 5-Min Nifty Candlestick & Volume")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=nifty.index, open=nifty['Open'], high=nifty['High'], low=nifty['Low'], close=nifty['Close'], name="Price"))
 fig.add_trace(go.Bar(x=nifty.index, y=nifty['Volume'], name="Volume", yaxis="y2", opacity=0.3, marker_color='white'))
-
-fig.update_layout(
-    template="plotly_dark", height=500, xaxis_rangeslider_visible=False,
-    yaxis=dict(title="Price"),
-    yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False)
-)
+fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, yaxis=dict(title="Price"), yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False))
 st.plotly_chart(fig, use_container_width=True)
