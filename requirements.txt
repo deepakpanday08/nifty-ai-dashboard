@@ -7,3 +7,4 @@ mplfinance
 matplotlib
 vaderSentiment
 scikit-learn
+pytz
