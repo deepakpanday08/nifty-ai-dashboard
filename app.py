@@ -4,7 +4,7 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -14,28 +14,50 @@ st_autorefresh(interval=60 * 1000, key="live_sync")
 IST = pytz.timezone('Asia/Kolkata')
 now_ist = datetime.now(IST)
 
-# Background Data (Hidden from UI)
 NIFTY_CONSTITUENTS = {
-    "FINANCE": {"HDFCBANK.NS": 13.2, "ICICIBANK.NS": 9.1, "AXISBANK.NS": 3.2},
-    "OIL_GAS": {"RELIANCE.NS": 9.4, "ONGC.NS": 1.2, "BPCL.NS": 0.6},
-    "IT": {"TCS.NS": 3.9, "INFY.NS": 5.1, "HCLTECH.NS": 1.5},
-    "FMCG": {"ITC.NS": 3.8, "HINDUNILVR.NS": 2.2}
+    "FINANCE": {"HDFCBANK.NS": 13.2, "ICICIBANK.NS": 9.1},
+    "OIL_GAS": {"RELIANCE.NS": 9.4},
+    "IT": {"TCS.NS": 3.9, "INFY.NS": 5.1}
 }
-MACRO_IMPACT_MAP = {"crude oil": {"OIL_GAS": -1}, "repo rate": {"FINANCE": -1}, "dollar": {"IT": 1}}
 
-# --- 2. BACKEND ENGINE ---
+# --- 2. BACKEND CALCULATIONS ---
+def get_sr_levels(df):
+    """Detects Support & Resistance levels from 30-day data."""
+    highs = df['High'].values
+    lows = df['Low'].values
+    # Logic: Identify local max/min points
+    res = df['High'].rolling(window=10, center=True).max().unique()
+    sup = df['Low'].rolling(window=10, center=True).min().unique()
+    # Clean up and pick top 2 closest to current price
+    current_price = df['Close'].iloc[-1]
+    resistances = sorted([x for x in res if x > current_price])[:2]
+    supports = sorted([x for x in sup if x < current_price], reverse=True)[:2]
+    return supports, resistances
+
+def get_option_chain():
+    """Fetches Nifty Option Chain data."""
+    try:
+        nft = yf.Ticker("^NSEI")
+        expiry = nft.options[0]  # Get nearest expiry
+        chain = nft.option_chain(expiry)
+        calls = chain.calls[['strike', 'lastPrice', 'openInterest', 'volume']].rename(columns=lambda x: f"CE_{x}")
+        puts = chain.puts[['strike', 'lastPrice', 'openInterest', 'volume']].rename(columns=lambda x: f"PE_{x}")
+        merged = pd.merge(calls, puts, left_on='CE_strike', right_on='PE_strike').rename(columns={'CE_strike': 'Strike'})
+        # Filter 10 strikes around ATM
+        ltp_now = float(yf.download("^NSEI", period="1d", progress=False)['Close'].iloc[-1])
+        atm_strike = round(ltp_now / 50) * 50
+        return merged[(merged['Strike'] >= atm_strike-250) & (merged['Strike'] <= atm_strike+250)]
+    except: return pd.DataFrame()
+
 def calculate_internal_metrics():
-    """Silent background calculation for Confidence and Stock Positions."""
-    analyzer = SentimentIntensityAnalyzer()
     stock_positions = []
-    top_tickers = ["HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS"]
+    top_tickers = ["HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS", "INFY.NS"]
     for ticker in top_tickers:
-        t = yf.Ticker(ticker)
-        d = t.history(period="1d")
-        if not d.empty:
+        try:
+            d = yf.download(ticker, period="1d", progress=False)
             change = d['Close'].iloc[-1] - d['Open'].iloc[-1]
-            pos = "Positive (Buying)" if change > 0 else "Negative (Selling)"
-            stock_positions.append({"Stock": ticker.replace(".NS",""), "Status": pos})
+            stock_positions.append({"Stock": ticker.replace(".NS",""), "Status": "Buying" if change > 0 else "Selling"})
+        except: continue
     return stock_positions
 
 def get_global_metrics():
@@ -52,75 +74,70 @@ def get_global_metrics():
     return label, color, score
 
 # --- 3. DATA FETCHING ---
-nifty = yf.download("^NSEI", period="2d", interval="5m", progress=False)
-ltp = float(nifty['Close'].iloc[-1])
+nifty_5m = yf.download("^NSEI", period="2d", interval="5m", progress=False)
+nifty_30d = yf.download("^NSEI", period="1mo", interval="1d", progress=False)
+ltp = float(nifty_5m['Close'].iloc[-1])
 global_label, global_color, global_val = get_global_metrics()
 top_5_stocks = calculate_internal_metrics()
+sup_levels, res_levels = get_sr_levels(nifty_30d)
 
 # --- 4. DASHBOARD UI ---
-st.markdown("<h1 style='text-align: center; color: #00ffcc;'>NIFTY AI COMMAND CENTER</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; color: #00ffcc;'>NIFTY AI PRO TERMINAL</h1>", unsafe_allow_html=True)
 
-# ROW 1: CORE METRICS
+# ROW 1: TOP METRICS
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("CURRENT NIFTY", f"{ltp:.2f}")
-m2.markdown(f"**GLOBAL SENTIMENT**<br><span style='color:{global_color}; font-size:22px; font-weight:bold;'>{global_label}</span>", unsafe_allow_html=True)
-m3.metric("EXPIRY MODE", "HERO-ZERO (TUE)" if now_ist.weekday() == 1 else "REGULAR")
+m2.markdown(f"**GLOBAL SENTIMENT**<br><span style='color:{global_color}; font-size:22px;'>{global_label}</span>", unsafe_allow_html=True)
+m3.metric("EXPIRY MODE", "HERO-ZERO" if now_ist.weekday() == 1 else "REGULAR")
 m4.metric("TIME (IST)", now_ist.strftime('%H:%M'))
 
 st.divider()
 
-# ROW 2: SIGNALS, HERO-ZERO & INSTITUTIONS
+# ROW 2: SIGNALS & OPTION CHAIN
 col_signal, col_fii = st.columns([2, 1])
-
 with col_signal:
     st.subheader("🎯 Active Trade Signal")
-    confidence = "Low"
-    if abs(global_val) > 0.003: confidence = "Mid"
-    if abs(global_val) > 0.006: confidence = "High"
-    
     if now_ist.time() < time(9, 30):
         st.info("⌛ OPENING RANGE SCAN: Awaiting 09:30 AM stability.")
     else:
+        conf = "High" if abs(global_val) > 0.005 else "Mid"
         if global_val > 0.001:
-            st.success(f"🚀 **BUY CALL (CE)** | Confidence: **{confidence}**")
-            st.write(f"**Target:** {ltp+45:.2f} | **SL:** {ltp-25:.2f}")
+            st.success(f"🚀 BUY CALL (CE) | Confidence: {conf}")
+            st.write(f"Target: {ltp+40:.2f} | SL: {ltp-25:.2f}")
         elif global_val < -0.001:
-            st.error(f"📉 **BUY PUT (PE)** | Confidence: **{confidence}**")
-            st.write(f"**Target:** {ltp-45:.2f} | **SL:** {ltp+25:.2f}")
-        else:
-            st.warning("⚖️ **WAITING** - Market is currently in a Neutral/Sideways zone.")
+            st.error(f"📉 BUY PUT (PE) | Confidence: {conf}")
+            st.write(f"Target: {ltp-40:.2f} | SL: {ltp+25:.2f}")
+        else: st.warning("⚖️ WAITING - No Trend Confluence")
 
-    # --- HERO-ZERO SUGGESTION SECTION ---
-    st.divider()
-    st.subheader("⚡ HERO-ZERO SUGGESTION")
-    is_expiry_day = now_ist.weekday() == 1  # Tuesday (Nifty Fin/Midcap common)
-    if is_expiry_day and now_ist.hour >= 13:
-        # Strike selection: 50-100 points OTM
-        strike_call = int(round((ltp + 70) / 50) * 50)
-        strike_put = int(round((ltp - 70) / 50) * 50)
-        
-        if global_val > 0.002:
-            st.markdown(f"🔥 **EXPIRY BLAST (CE):** Buy Nifty {strike_call} CE")
-            st.caption("Suggested Entry: ₹5-₹10 | Target: ₹30-₹50 | SL: Zero")
-        elif global_val < -0.002:
-            st.markdown(f"🔥 **EXPIRY BLAST (PE):** Buy Nifty {strike_put} PE")
-            st.caption("Suggested Entry: ₹5-₹10 | Target: ₹30-₹50 | SL: Zero")
-        else:
-            st.info("No clear trend for Hero-Zero yet. Waiting for Gamma move.")
-    else:
-        st.write("🔴 Hero-Zero mode inactive. (Active Tuesdays after 1:00 PM)")
+    st.subheader("⛓️ Live Option Chain (ATM ± 250)")
+    oc_data = get_option_chain()
+    if not oc_data.empty:
+        st.dataframe(oc_data, hide_index=True)
 
 with col_fii:
-    st.subheader("🔝 Top 5 Stock Positions")
+    st.subheader("🔝 Top Stock Positions")
     st.table(pd.DataFrame(top_5_stocks))
-    st.subheader("📊 Institutional Flow")
-    st.markdown("**FII:** -₹1,240 Cr | **DII:** +₹950 Cr")
+    if now_ist.weekday() == 1 and now_ist.hour >= 13:
+        st.subheader("⚡ HERO-ZERO")
+        st.warning(f"Strike: {round(ltp/50)*50} | Target: 3X-5X")
 
-# ROW 3: CHART (BOTTOM)
+# ROW 3: CHARTS
 st.divider()
-st.subheader("📈 Live 5-Min Nifty Candlestick & Volume")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=nifty.index, open=nifty['Open'], high=nifty['High'], low=nifty['Low'], close=nifty['Close'], name="Price"))
-fig.add_trace(go.Bar(x=nifty.index, y=nifty['Volume'], name="Volume", yaxis="y2", opacity=0.3, marker_color='white'))
-fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, yaxis=dict(title="Price"), yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False))
-st.plotly_chart(fig, use_container_width=True)
+c1, c2 = st.columns(2)
+
+with c1:
+    st.subheader("📈 Live 5-Min Chart & Volume")
+    fig1 = go.Figure(data=[go.Candlestick(x=nifty_5m.index, open=nifty_5m['Open'], high=nifty_5m['High'], low=nifty_5m['Low'], close=nifty_5m['Close'])])
+    fig1.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig1, use_container_width=True)
+
+with c2:
+    st.subheader("🗓️ 30-Day Trend + Support/Resistance")
+    fig2 = go.Figure(data=[go.Candlestick(x=nifty_30d.index, open=nifty_30d['Open'], high=nifty_30d['High'], low=nifty_30d['Low'], close=nifty_30d['Close'])])
+    # Add S&R Lines
+    for s in sup_levels:
+        fig2.add_hline(y=s, line_dash="dash", line_color="green", annotation_text="Support")
+    for r in res_levels:
+        fig2.add_hline(y=r, line_dash="dash", line_color="red", annotation_text="Resistance")
+    fig2.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig2, use_container_width=True)
