@@ -1,8 +1,7 @@
 streamlit
-plotly
+streamlit-autorefresh
 yfinance
 pandas
 numpy
-vaderSentiment
-streamlit-autorefresh
+plotly
 pytz
