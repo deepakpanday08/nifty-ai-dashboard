@@ -26,29 +26,53 @@ MACRO_IMPACT_MAP = {"crude oil": {"OIL_GAS": -1}, "repo rate": {"FINANCE": -1}, 
 def get_sr_levels(df):
     """Detects Support & Resistance levels from 30-day data."""
     try:
-        # Detect local peaks and troughs
         res = df['High'].rolling(window=5, center=True).max().dropna().unique()
         sup = df['Low'].rolling(window=5, center=True).min().dropna().unique()
         current_price = df['Close'].iloc[-1]
-        # Filter for closest levels
         resistances = sorted([x for x in res if x > current_price])[:2]
         supports = sorted([x for x in sup if x < current_price], reverse=True)[:2]
         return supports, resistances
     except: return [], []
 
 def get_option_chain():
-    """Fetches Live Nifty Option Chain data."""
+    """FIXED: Fetches Live Nifty Option Chain data with Fallback Logic."""
     try:
         nft = yf.Ticker("^NSEI")
+        # Try to get the first available expiry
+        if not nft.options:
+            return pd.DataFrame()
+            
         expiry = nft.options[0] 
         chain = nft.option_chain(expiry)
-        calls = chain.calls[['strike', 'lastPrice', 'openInterest', 'volume']].add_prefix("CE_")
-        puts = chain.puts[['strike', 'lastPrice', 'openInterest', 'volume']].add_prefix("PE_")
-        merged = pd.merge(calls, puts, left_on='CE_strike', right_on='PE_strike').rename(columns={'CE_strike': 'Strike'})
-        ltp_now = float(yf.download("^NSEI", period="1d", progress=False, multi_level_index=False)['Close'].iloc[-1])
+        
+        # Clean and format Calls/Puts
+        calls = chain.calls[['strike', 'lastPrice', 'openInterest', 'volume']].copy()
+        puts = chain.puts[['strike', 'lastPrice', 'openInterest', 'volume']].copy()
+        
+        merged = pd.merge(calls, puts, on='strike', suffixes=('_CE', '_PE'))
+        
+        # Get Current LTP to filter strikes
+        ltp_data = yf.download("^NSEI", period="1d", interval="1m", progress=False, multi_level_index=False)
+        ltp_now = float(ltp_data['Close'].iloc[-1])
         atm = round(ltp_now / 50) * 50
-        return merged[(merged['Strike'] >= atm-200) & (merged['Strike'] <= atm+200)]
-    except: return pd.DataFrame()
+        
+        # Filter for ATM +/- 200 points
+        final_df = merged[(merged['strike'] >= atm-200) & (merged['strike'] <= atm+200)]
+        
+        # Clean column names for better dashboard view
+        final_df = final_df.rename(columns={
+            'strike': 'Strike',
+            'lastPrice_CE': 'CE Price',
+            'openInterest_CE': 'CE OI',
+            'volume_CE': 'CE Vol',
+            'lastPrice_PE': 'PE Price',
+            'openInterest_PE': 'PE OI',
+            'volume_PE': 'PE Vol'
+        })
+        return final_df
+    except Exception as e:
+        # Fallback: If yfinance fails, create a placeholder table so the UI doesn't break
+        return pd.DataFrame({"Message": ["Option data currently restricted by NSE/Yahoo API. Try refreshing in 1 min."]})
 
 def calculate_internal_metrics():
     stock_positions = []
@@ -58,7 +82,7 @@ def calculate_internal_metrics():
         d = t.history(period="1d")
         if not d.empty:
             change = d['Close'].iloc[-1] - d['Open'].iloc[-1]
-            pos = "Positive (Buying)" if change > 0 else "Negative (Selling)"
+            pos = "🟢 Positive (Buying)" if change > 0 else "🔴 Negative (Selling)"
             stock_positions.append({"Stock": ticker.replace(".NS",""), "Status": pos})
     return stock_positions
 
@@ -76,7 +100,6 @@ def get_global_metrics():
     return label, color, score
 
 # --- 3. DATA FETCHING ---
-# Fixing the MultiIndex error by forcing single level columns
 nifty_5m = yf.download("^NSEI", period="2d", interval="5m", progress=False, multi_level_index=False)
 nifty_30d = yf.download("^NSEI", period="1mo", interval="1d", progress=False, multi_level_index=False)
 
@@ -97,7 +120,7 @@ m4.metric("TIME (IST)", now_ist.strftime('%H:%M'))
 
 st.divider()
 
-# ROW 2: SIGNALS & OPTION CHAIN
+# ROW 2: SIGNALS & POSITIONS
 col_sig, col_top = st.columns([2, 1])
 
 with col_sig:
@@ -126,17 +149,24 @@ with col_top:
     st.subheader("📊 FII/DII Data")
     st.write("FII: -₹1,450 Cr | DII: +₹1,120 Cr")
 
-# ROW 3: OPTION CHAIN
+# ROW 3: OPTION CHAIN (IMPROVED VIEW)
 st.divider()
 st.subheader("⛓️ Live Option Chain (ATM ± 200)")
 chain_df = get_option_chain()
-if not chain_df.empty:
-    st.dataframe(chain_df, hide_index=True, use_container_width=True)
 
-# ROW 4: CHARTS (BOTTOM)
+if not chain_df.empty:
+    if "Strike" in chain_df.columns:
+        # Standardize colors for the table
+        st.dataframe(chain_df.style.background_gradient(subset=['CE OI', 'PE OI'], cmap='RdYlGn'), 
+                     hide_index=True, use_container_width=True)
+    else:
+        st.warning(chain_df["Message"].iloc[0])
+else:
+    st.error("Option data not returned from NSE servers. Ensure the market is open or API is active.")
+
+# ROW 4: CHARTS
 st.divider()
 c1, c2 = st.columns(2)
-
 with c1:
     st.subheader("📈 Live 5-Min Nifty & Volume")
     fig1 = go.Figure()
@@ -148,7 +178,6 @@ with c1:
 with c2:
     st.subheader("🗓️ 30-Day Nifty Trend (S&R)")
     fig2 = go.Figure(data=[go.Candlestick(x=nifty_30d.index, open=nifty_30d['Open'], high=nifty_30d['High'], low=nifty_30d['Low'], close=nifty_30d['Close'])])
-    # Drawing Support & Resistance
     for s in sup_levels:
         fig2.add_hline(y=s, line_dash="dash", line_color="green", annotation_text=f"Sup: {s:.0f}")
     for r in res_levels:
