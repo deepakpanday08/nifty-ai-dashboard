@@ -6,89 +6,123 @@ import mplfinance as mpf
 from sklearn.ensemble import RandomForestClassifier
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
+import pytz
 import matplotlib.pyplot as plt
 
-# --- CONFIG & HEAVYWEIGHTS ---
+# --- 1. SETTINGS & REFRESH ---
+st.set_page_config(page_title="Nifty AI Master", layout="wide", page_icon="🎯")
+st_autorefresh(interval=60 * 1000, key="live_sync") # 1-minute fast-track refresh
+
+# Timezone Handling
+IST = pytz.timezone('Asia/Kolkata')
+now_ist = datetime.now(IST)
+
+# NSE Heavyweights (Impact Nifty by ~40%)
 HEAVYWEIGHTS = ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS"]
-st_autorefresh(interval=60 * 1000, key="live_update") # Refresh every 60s for live market
+
+# --- 2. DATA ENGINE ---
+@st.cache_data(ttl=60)
+def fetch_market_data():
+    # Primary Data
+    nifty = yf.download("^NSEI", interval="15m", period="5d", progress=False)
+    # Global/Gifty Nifty proxy (using pre-market index)
+    sp500 = yf.download("^GSPC", interval="15m", period="5d", progress=False)
+    
+    # Flatten MultiIndex if yfinance returns it
+    for df in [nifty, sp500]:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
+            
+    return nifty, sp500
 
 def get_weighted_sentiment():
-    """Scrapes news for Nifty + Top 5 Stocks for deeper accuracy."""
     analyzer = SentimentIntensityAnalyzer()
     scores = []
-    # Scrape Nifty + Top 5 heavyweights
-    for ticker in ["^NSEI"] + HEAVYWEIGHTS:
+    # Scrape Nifty + Top 5 heavyweights for higher accuracy
+    for t in ["^NSEI"] + HEAVYWEIGHTS:
         try:
-            news = yf.Ticker(ticker).news
-            for n in news[:3]:
-                scores.append(analyzer.polarity_scores(n['title'])['compound'])
+            news = yf.Ticker(t).news
+            if news:
+                scores.append(analyzer.polarity_scores(news[0].get('title', ''))['compound'])
         except: continue
     return np.mean(scores) if scores else 0.0
 
-def detect_channel(df):
-    """Calculates a Linear Regression Channel for the current day."""
+# --- 3. PATTERN & HERO-ZERO LOGIC ---
+def analyze_execution(df):
+    # Linear Regression Channel Calculation
     y = df['Close'].values
     x = np.arange(len(y))
     slope, intercept = np.polyfit(x, y, 1)
-    line = slope * x + intercept
-    std = np.std(y - line)
-    upper_channel = line + (2 * std)
-    lower_channel = line - (2 * std)
-    return line, upper_channel, lower_channel
+    center = slope * x + intercept
+    std = np.std(y - center)
+    
+    upper = center + (1.5 * std)
+    lower = center - (1.5 * std)
+    
+    current_price = df['Close'].iloc[-1]
+    
+    # Hero-Zero Logic (TUESDAY ONLY)
+    hero_signal = "WAITING"
+    # 1 = Tuesday
+    if now_ist.weekday() == 1 and now_ist.hour >= 13 and now_ist.minute >= 30:
+        strike = int(round(current_price / 50) * 50)
+        if current_price > upper[-1]:
+            hero_signal = f"🚀 HERO CALL: {strike} CE"
+        elif current_price < lower[-1]:
+            hero_signal = f"🩸 HERO PUT: {strike} PE"
+            
+    return current_price, upper, lower, hero_signal
 
-# --- MAIN ENGINE ---
-st.title("🏹 Nifty Execution Engine: Live Entry/Exit")
+# --- 4. DASHBOARD UI ---
+st.title("🏹 Nifty AI Execution Engine")
+st.write(f"IST Time: {now_ist.strftime('%H:%M:%S')} | Day: {now_ist.strftime('%A')}")
 
-# Data Fetching
-nifty_df = yf.download("^NSEI", interval="15m", period="2d", progress=False)
-if isinstance(nifty_df.columns, pd.MultiIndex): nifty_df.columns = [c[0] for c in nifty_df.columns]
+# Run Backend
+with st.spinner('Syncing with NSE Servers...'):
+    nifty, sp500 = fetch_market_data()
+    sentiment = get_weighted_sentiment()
+    ltp, up_band, lo_band, hero = analyze_execution(nifty)
 
-# Pattern & Sentiment
-sentiment = get_weighted_sentiment()
-mid, upper, lower = detect_channel(nifty_df)
+# Metrics Row
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("NIFTY 50", f"{ltp:.2f}")
+m2.metric("Heavyweight Sentiment", f"{sentiment:+.2f}")
+m3.metric("Channel Status", "Overbought" if ltp > up_band[-1] else "Oversold" if ltp < lo_band[-1] else "Neutral")
+m4.metric("Market Bias", "BULLISH" if sentiment > 0.1 else "BEARISH" if sentiment < -0.1 else "SIDEWAYS")
 
-# AI Signal Logic
-current_price = nifty_df['Close'].iloc[-1]
-rsi = 100 - (100 / (1 + (nifty_df['Close'].diff().clip(lower=0).rolling(14).mean() / 
-                         (-nifty_df['Close'].diff().clip(upper=0).rolling(14).mean() + 1e-9))))
+# --- SIGNAL & HERO-ZERO PANEL ---
+col_sig, col_hero = st.columns(2)
 
-# --- PREDICTION & EXECUTION BOX ---
-st.subheader("🎯 Live Execution Signal")
-col1, col2 = st.columns([1, 1])
+with col_sig:
+    st.subheader("🎯 Trade Execution")
+    if ltp > up_band[-1] and sentiment > 0:
+        st.success(f"**SIGNAL: BUY/CALL ENTRY**\n\nTarget: {ltp + 45} | SL: {ltp - 20}")
+    elif ltp < lo_band[-1] and sentiment < 0:
+        st.error(f"**SIGNAL: SELL/PUT ENTRY**\n\nTarget: {ltp - 45} | SL: {ltp + 20}")
+    else:
+        st.warning("⚖️ **NO TRADE ZONE**: Wait for Channel Breakout + Sentiment Sync.")
 
-# Logic for Entry/Exit
-if current_price >= upper[-1] and sentiment < 0:
-    signal = "🔴 SELL/PUT ENTRY"
-    entry = current_price
-    target = lower[-1]
-    stop = current_price + (current_price * 0.002) # 0.2% SL
-    confidence = "HIGH (Channel Overbought + Negative Sentiment)"
-elif current_price <= lower[-1] and sentiment > 0:
-    signal = "🟢 BUY/CALL ENTRY"
-    entry = current_price
-    target = upper[-1]
-    stop = current_price - (current_price * 0.002)
-    confidence = "HIGH (Channel Oversold + Positive Sentiment)"
-else:
-    signal = "🟡 NO TRADE ZONE"
-    entry, target, stop, confidence = 0, 0, 0, "WAITING FOR BREAKOUT"
+with col_hero:
+    st.subheader("⚡ Tuesday Hero-Zero")
+    if now_ist.weekday() == 1:
+        if "WAITING" in hero:
+            st.info("Logic active after 01:30 PM on Expiry Day (Tuesday).")
+        else:
+            st.warning(f"🔥 **{hero}**")
+            st.caption("Low capital high-risk trade. Suggested entry ₹5-₹10.")
+    else:
+        st.write("Inactive (Only active on Tuesdays).")
 
-with col1:
-    st.info(f"**Action:** {signal}")
-    st.write(f"**Confidence:** {confidence}")
-
-with col2:
-    if entry > 0:
-        st.write(f"✅ **Entry:** {entry:.2f}")
-        st.write(f"🎯 **Target:** {target:.2f}")
-        st.write(f"🛑 **Stop Loss:** {stop:.2f}")
-
-# Graphical Representation
-st.subheader("📊 15-Min Trend Channel")
+# --- CHARTING ---
+st.subheader("📊 15-Minute Linear Regression Channel")
 fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(nifty_df.index, nifty_df['Close'], label="Price", color="cyan")
-ax.plot(nifty_df.index, upper, '--', color="red", alpha=0.5, label="Upper Channel")
-ax.plot(nifty_df.index, lower, '--', color="green", alpha=0.5, label="Lower Channel")
-ax.fill_between(nifty_df.index, lower, upper, color='gray', alpha=0.1)
+ax.plot(nifty.index, nifty['Close'], label="Price", color='#1f77b4', linewidth=2)
+ax.plot(nifty.index, up_band, '--', color='red', alpha=0.6, label="Resistance")
+ax.plot(nifty.index, lo_band, '--', color='green', alpha=0.6, label="Support")
+ax.fill_between(nifty.index, lo_band, up_band, color='gray', alpha=0.1)
 plt.legend()
 st.pyplot(fig)
+
+st.divider()
+st.caption("Disclaimer: AI analysis is for educational purposes. Always verify with your financial advisor before trading.")
