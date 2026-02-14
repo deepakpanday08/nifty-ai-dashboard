@@ -6,86 +6,89 @@ import mplfinance as mpf
 from sklearn.ensemble import RandomForestClassifier
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
 import matplotlib.pyplot as plt
 
-# 1. PAGE SETUP
-st.set_page_config(page_title="Self-Learning Nifty AI", layout="wide")
-st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
+# --- CONFIG & HEAVYWEIGHTS ---
+HEAVYWEIGHTS = ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS"]
+st_autorefresh(interval=60 * 1000, key="live_update") # Refresh every 60s for live market
 
-# 2. DATA ENGINE
-@st.cache_data(ttl=200)
-def fetch_data():
-    nifty = yf.download("^NSEI", interval="15m", period="5d", auto_adjust=True, progress=False)
-    sp500 = yf.download("^GSPC", interval="15m", period="5d", auto_adjust=True, progress=False)
-    usdinr = yf.download("USDINR=X", interval="15m", period="5d", auto_adjust=True, progress=False)
-    
-    for df in [nifty, sp500, usdinr]:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] for col in df.columns]
-    
-    # Features
-    delta = nifty['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    nifty['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-    nifty['sp500_chg'] = sp500['Close'].pct_change().reindex(nifty.index, method='ffill')
-    nifty['usd_chg'] = usdinr['Close'].pct_change().reindex(nifty.index, method='ffill')
-    
-    return nifty
+def get_weighted_sentiment():
+    """Scrapes news for Nifty + Top 5 Stocks for deeper accuracy."""
+    analyzer = SentimentIntensityAnalyzer()
+    scores = []
+    # Scrape Nifty + Top 5 heavyweights
+    for ticker in ["^NSEI"] + HEAVYWEIGHTS:
+        try:
+            news = yf.Ticker(ticker).news
+            for n in news[:3]:
+                scores.append(analyzer.polarity_scores(n['title'])['compound'])
+        except: continue
+    return np.mean(scores) if scores else 0.0
 
-# 3. FEEDBACK & LEARNING LOGIC
-def evaluate_performance(df):
-    """Checks past predictions vs actual outcomes."""
-    # We define a 'Correct' prediction if the AI predicted UP and price went UP 3 candles later
-    df['target'] = (df['Close'].shift(-3) > df['Close']).astype(int)
-    
-    # Simulating backtest on the last 50 candles to see AI accuracy
-    feature_cols = ['rsi', 'sp500_chg', 'usd_chg']
-    data = df[feature_cols + ['target']].dropna()
-    
-    if len(data) > 40:
-        # Split into training and testing
-        train = data.iloc[:-10]
-        test = data.iloc[-10:]
-        
-        clf = RandomForestClassifier(n_estimators=100)
-        clf.fit(train[feature_cols], train['target'])
-        
-        preds = clf.predict(test[feature_cols])
-        accuracy = (preds == test['target']).mean()
-        return accuracy, clf, feature_cols
-    return 0.5, None, feature_cols
+def detect_channel(df):
+    """Calculates a Linear Regression Channel for the current day."""
+    y = df['Close'].values
+    x = np.arange(len(y))
+    slope, intercept = np.polyfit(x, y, 1)
+    line = slope * x + intercept
+    std = np.std(y - line)
+    upper_channel = line + (2 * std)
+    lower_channel = line - (2 * std)
+    return line, upper_channel, lower_channel
 
-# 4. DASHBOARD UI
-st.title("🤖 Self-Learning Nifty 50 AI")
-nifty = fetch_data()
-accuracy, trained_model, features = evaluate_performance(nifty)
+# --- MAIN ENGINE ---
+st.title("🏹 Nifty Execution Engine: Live Entry/Exit")
 
-# Performance Header
-col_acc1, col_acc2 = st.columns(2)
-with col_acc1:
-    st.metric("Model Learning Accuracy", f"{accuracy*100:.1f}%", 
-              delta="Learning" if accuracy > 0.5 else "Calibrating")
-with col_acc2:
-    st.info(f"AI is currently learning from the last {len(nifty)} market intervals.")
+# Data Fetching
+nifty_df = yf.download("^NSEI", interval="15m", period="2d", progress=False)
+if isinstance(nifty_df.columns, pd.MultiIndex): nifty_df.columns = [c[0] for c in nifty_df.columns]
 
-# Prediction Section
-if trained_model:
-    latest_row = nifty[features].iloc[-1:].fillna(0)
-    prob = trained_model.predict_proba(latest_row)[0][1]
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("LTP", f"{nifty['Close'].iloc[-1]:.2f}")
-    m2.metric("Bullish Confidence", f"{prob*100:.1f}%")
-    
-    if prob > 0.60:
-        st.success("🎯 AI Feedback: High confidence in UPWARD move.")
-    elif prob < 0.40:
-        st.error("📉 AI Feedback: High confidence in DOWNWARD move.")
-    else:
-        st.warning("⚖️ AI Feedback: Neutral. Market is indecisive.")
+# Pattern & Sentiment
+sentiment = get_weighted_sentiment()
+mid, upper, lower = detect_channel(nifty_df)
 
-# Chart
-fig, ax = mpf.plot(nifty.tail(50), type='candle', style='charles', mav=(20, 50), returnfig=True, figsize=(10, 5))
+# AI Signal Logic
+current_price = nifty_df['Close'].iloc[-1]
+rsi = 100 - (100 / (1 + (nifty_df['Close'].diff().clip(lower=0).rolling(14).mean() / 
+                         (-nifty_df['Close'].diff().clip(upper=0).rolling(14).mean() + 1e-9))))
+
+# --- PREDICTION & EXECUTION BOX ---
+st.subheader("🎯 Live Execution Signal")
+col1, col2 = st.columns([1, 1])
+
+# Logic for Entry/Exit
+if current_price >= upper[-1] and sentiment < 0:
+    signal = "🔴 SELL/PUT ENTRY"
+    entry = current_price
+    target = lower[-1]
+    stop = current_price + (current_price * 0.002) # 0.2% SL
+    confidence = "HIGH (Channel Overbought + Negative Sentiment)"
+elif current_price <= lower[-1] and sentiment > 0:
+    signal = "🟢 BUY/CALL ENTRY"
+    entry = current_price
+    target = upper[-1]
+    stop = current_price - (current_price * 0.002)
+    confidence = "HIGH (Channel Oversold + Positive Sentiment)"
+else:
+    signal = "🟡 NO TRADE ZONE"
+    entry, target, stop, confidence = 0, 0, 0, "WAITING FOR BREAKOUT"
+
+with col1:
+    st.info(f"**Action:** {signal}")
+    st.write(f"**Confidence:** {confidence}")
+
+with col2:
+    if entry > 0:
+        st.write(f"✅ **Entry:** {entry:.2f}")
+        st.write(f"🎯 **Target:** {target:.2f}")
+        st.write(f"🛑 **Stop Loss:** {stop:.2f}")
+
+# Graphical Representation
+st.subheader("📊 15-Min Trend Channel")
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.plot(nifty_df.index, nifty_df['Close'], label="Price", color="cyan")
+ax.plot(nifty_df.index, upper, '--', color="red", alpha=0.5, label="Upper Channel")
+ax.plot(nifty_df.index, lower, '--', color="green", alpha=0.5, label="Lower Channel")
+ax.fill_between(nifty_df.index, lower, upper, color='gray', alpha=0.1)
+plt.legend()
 st.pyplot(fig)
