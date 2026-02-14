@@ -6,126 +6,85 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, time
 import pytz
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# --- 1. CORE SETUP ---
-st.set_page_config(page_title="Nifty Quant Intelligence", layout="wide")
-st_autorefresh(interval=60 * 1000, key="quant_engine_refresh")
+# --- 1. SETTINGS ---
+st.set_page_config(page_title="NIFTY AI MASTER", layout="wide")
+st_autorefresh(interval=60 * 1000, key="live_sync")
 IST = pytz.timezone('Asia/Kolkata')
 now_ist = datetime.now(IST)
 
-# --- 2. BACKEND MULTI-FACTOR SCORING (HIDDEN) ---
-
-def analyze_macro_and_sector():
-    """Scans for indirect impact: Geopolitics, Oil, and Reliance/HDFC News."""
-    analyzer = SentimentIntensityAnalyzer()
-    # Strategic Tickers for Indirect Impact
-    impact_tickers = ["RELIANCE.NS", "HDFCBANK.NS", "CL=F", "GC=F"] # Reliance, HDFC, Oil, Gold
-    total_sentiment = 0
-    try:
-        for ticker in impact_tickers:
-            news = yf.Ticker(ticker).news
-            # Analyze top 3 headlines per ticker
-            scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news[:3]]
-            total_sentiment += np.mean(scores) if scores else 0
-    except: pass
-    return total_sentiment / len(impact_tickers)
-
-def get_institutional_bias():
-    """Analyzes FII/DII proxy via Volume-Price Trend."""
-    df = yf.download("^NSEI", period="5d", interval="1d", progress=False)
-    if df.empty: return 0
-    if isinstance(df.columns, pd.MultiIndex): df.columns = [c[0] for c in df.columns]
-    
-    # Calculate delivery/volume pressure proxy
-    avg_vol = df['Volume'].mean()
-    curr_vol = df['Volume'].iloc[-1]
-    price_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
-    
-    # If price is up on high volume, institutional accumulation is likely
-    if price_change > 0 and curr_vol > avg_vol: return 1  # Accumulation
-    if price_change < 0 and curr_vol > avg_vol: return -1 # Distribution
-    return 0
-
-def get_global_bias():
-    """US & Asian Market Lead Analysis."""
-    indices = {"^GSPC": 0.5, "^N225": 0.5} # S&P 500 and Nikkei
+# --- 2. BACKEND CALCULATIONS ---
+def get_global_bias_text():
+    # US & Japan weighted analysis
+    indices = {"^GSPC": 0.5, "^N225": 0.5}
     score = 0
     for ticker, weight in indices.items():
         try:
-            d = yf.download(ticker, period="2d", interval="15m", progress=False)
-            change = (d['Close'].iloc[-1] - d['Close'].iloc[0]) / d['Close'].iloc[0]
+            data = yf.download(ticker, period="2d", interval="15m", progress=False)
+            change = (data['Close'].iloc[-1] - data['Close'].iloc[0]) / data['Close'].iloc[0]
             score += float(change) * weight
         except: continue
-    return score
+    
+    if score > 0.001: return "POSITIVE (Bullish)", "green", score
+    if score < -0.001: return "NEGATIVE (Bearish)", "red", score
+    return "NEUTRAL", "gray", score
 
-# --- 3. LIVE DATA & TECHNICAL CHANNELS ---
 @st.cache_data(ttl=60)
-def fetch_live_data():
+def fetch_nifty():
     df = yf.download("^NSEI", period="2d", interval="5m", progress=False)
     if isinstance(df.columns, pd.MultiIndex): df.columns = [c[0] for c in df.columns]
-    # 15-min Logic applied to 5-min data for precision
-    df['MA_Channel'] = df['Close'].rolling(window=20).mean()
-    df['Upper'] = df['MA_Channel'] + (df['Close'].rolling(20).std() * 1.5)
-    df['Lower'] = df['MA_Channel'] - (df['Close'].rolling(20).std() * 1.5)
+    df['MA20'] = df['Close'].rolling(20).mean()
     return df
 
-# --- 4. THE DECISION MATRIX ---
-nifty = fetch_live_data()
+# --- 3. DASHBOARD UI (The FIX) ---
+nifty = fetch_nifty()
 ltp = float(nifty['Close'].iloc[-1])
-macro_score = analyze_macro_and_sector()
-global_bias = get_global_bias()
-inst_bias = get_institutional_bias()
+bias_text, bias_color, bias_val = get_global_bias_text()
 
-# Weighted Probability Calculation
-# (Global 30% + Macro 30% + Institutional 20% + Technical 20%)
-prob_score = (global_bias * 10) + (macro_score * 5) + (inst_bias * 2)
+st.markdown(f"<h1 style='text-align: center; color: #00ffcc;'>NIFTY 50 AI TERMINAL</h1>", unsafe_allow_html=True)
 
-# --- 5. DASHBOARD LAYOUT (EXECUTIVE VIEW) ---
-st.markdown("<h1 style='text-align: center; color: #00ffcc;'>NIFTY QUANT INTELLIGENCE</h1>", unsafe_allow_html=True)
-
-# Metric Row
-c1, c2, c3, c4 = st.columns(4)
-overall_sent = "Positive" if prob_score > 0.1 else "Negative" if prob_score < -0.1 else "Neutral"
-c1.metric("NIFTY 50", f"{ltp:.2f}")
-c2.metric("OVERALL SENTIMENT", overall_sent)
-c3.metric("GLOBAL BIAS", f"{global_bias:+.4f}")
-c4.metric("EXPIRY MODE", "TUESDAY HERO-ZERO" if now_ist.weekday() == 1 else "NORMAL")
+# TOP METRICS (Clearer Labels)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("CURRENT NIFTY", f"{ltp:.2f}")
+m2.markdown(f"**GLOBAL BIAS** \n<span style='color:{bias_color}; font-size:20px;'>{bias_text}</span>", unsafe_allow_html=True)
+m3.metric("EXPIRY MODE", "TUESDAY HERO-ZERO" if now_ist.weekday() == 1 else "NORMAL")
+m4.metric("TIME (IST)", now_ist.strftime('%H:%M'))
 
 st.divider()
 
-# Signal Section
-sig_col, stat_col = st.columns([2, 1])
+# SIGNAL AREA (Must be above chart)
+sig_col, hero_col = st.columns([2, 1])
 
 with sig_col:
     st.subheader("🎯 Active Trade Signal")
-    # 9:30 AM Rule Check
+    
+    # 9:30 AM Logic
     if now_ist.time() < time(9, 30):
-        st.warning("🕒 Analyzing Opening Range... Signal locks at 09:30 AM IST.")
+        st.info(f"⏳ **WAITING FOR 9:30 AM** - System is currently analyzing opening volatility. {30 - now_ist.minute if now_ist.minute < 30 else 0} mins left.")
     else:
-        conf = "High" if abs(prob_score) > 0.5 else "Mid" if abs(prob_score) > 0.2 else "Low"
-        if prob_score > 0.1 and ltp > nifty['MA_Channel'].iloc[-1]:
-            st.success(f"🚀 **BUY CALL (CE)** | Entry: {ltp:.2f} | SL: {ltp-25:.2f} | Confidence: {conf}")
-        elif prob_score < -0.1 and ltp < nifty['MA_Channel'].iloc[-1]:
-            st.error(f"📉 **BUY PUT (PE)** | Entry: {ltp:.2f} | SL: {ltp+25:.2f} | Confidence: {conf}")
+        # Final Decision Logic
+        if bias_val > 0.001 and ltp > nifty['MA20'].iloc[-1]:
+            st.success(f"🚀 **BUY CALL (CE) SUGGESTION**\n\n**ENTRY:** {ltp:.2f} | **TARGET:** {ltp+40:.2f} | **SL:** {ltp-20:.2f}")
+            st.markdown("---")
+            st.caption("✅ Confidence: HIGH (Global Bias + Technical Trend match)")
+        elif bias_val < -0.001 and ltp < nifty['MA20'].iloc[-1]:
+            st.error(f"📉 **BUY PUT (PE) SUGGESTION**\n\n**ENTRY:** {ltp:.2f} | **TARGET:** {ltp-40:.2f} | **SL:** {ltp+20:.2f}")
+            st.markdown("---")
+            st.caption("✅ Confidence: HIGH (Global Bias + Technical Trend match)")
         else:
-            st.info("⚖️ **WAITING: Multi-Factor Mismatch.** High-probability setup not found.")
+            st.warning("⚖️ **STATUS: NEUTRAL** - Market is sideways or Global/Local signals are conflicting. Do not enter.")
 
-with stat_col:
-    st.subheader("🏦 Heavyweight Tracker")
-    # In backend we analyze, here we just show status
-    st.write(f"Reliance Impact: {'Bullish' if macro_score > 0 else 'Bearish'}")
-    st.write(f"Inst. Flow (FII/DII): {'Buying' if inst_bias > 0 else 'Selling'}")
+with hero_col:
+    st.subheader("⚡ Hero-Zero (Tuesday)")
+    if now_ist.weekday() == 1 and now_ist.hour >= 13:
+        strike = int(round(ltp / 50) * 50)
+        st.error(f"🔥 ACTIVE: {strike} {'CE' if bias_val > 0 else 'PE'}")
+        st.write("Target: 3x Returns | SL: 0")
+    else:
+        st.write("🔴 Inactive (Only on Tuesdays after 1 PM)")
 
-# --- 6. CHART AREA (Bottom) ---
+# --- 4. CHART (Bottom) ---
 st.divider()
-st.subheader("📊 Live Technical Pattern (5-Min Chart)")
-
-
-
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=nifty.index, open=nifty['Open'], high=nifty['High'], low=nifty['Low'], close=nifty['Close'], name="Candle"))
-fig.add_trace(go.Scatter(x=nifty.index, y=nifty['Upper'], line=dict(color='rgba(255,0,0,0.4)', width=1), name="Resistance"))
-fig.add_trace(go.Scatter(x=nifty.index, y=nifty['Lower'], line=dict(color='rgba(0,255,0,0.4)', width=1), name="Support"))
-fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+fig = go.Figure(data=[go.Candlestick(x=nifty.index, open=nifty['Open'], high=nifty['High'], low=nifty['Low'], close=nifty['Close'])])
+fig.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False, title="Live 5-Min Nifty Chart")
 st.plotly_chart(fig, use_container_width=True)
