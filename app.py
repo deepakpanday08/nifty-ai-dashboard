@@ -6,16 +6,64 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, time
 import pytz
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# --- 1. SETTINGS ---
+# --- 1. SETTINGS & WEIGHTS ---
 st.set_page_config(page_title="NIFTY AI MASTER", layout="wide")
 st_autorefresh(interval=60 * 1000, key="live_sync")
 IST = pytz.timezone('Asia/Kolkata')
 now_ist = datetime.now(IST)
 
+# --- NEW: SECTORAL WEIGHTAGE & MAPPING (Updated 2026 Weights) ---
+NIFTY_CONSTITUENTS = {
+    "FINANCE": {"HDFCBANK.NS": 13.2, "ICICIBANK.NS": 9.1, "AXISBANK.NS": 3.2},
+    "OIL_GAS": {"RELIANCE.NS": 9.4, "ONGC.NS": 1.2, "BPCL.NS": 0.6},
+    "IT": {"TCS.NS": 3.9, "INFY.NS": 5.1, "HCLTECH.NS": 1.5},
+    "FMCG": {"ITC.NS": 3.8, "HINDUNILVR.NS": 2.2}
+}
+
+# Key Macro-to-Sector Relationships (Logic: News -> Target Sector -> Impact)
+MACRO_IMPACT_MAP = {
+    "crude oil": {"OIL_GAS": -1, "PAINTS": 1, "AVIATION": 1}, 
+    "repo rate": {"FINANCE": -1, "AUTO": -1, "REALTY": -1}, 
+    "dollar": {"IT": 1, "PHARMA": 1} 
+}
+
 # --- 2. BACKEND CALCULATIONS ---
+
+def get_sectoral_sentiment():
+    """Calculates weighted sentiment for the entire Nifty 50."""
+    analyzer = SentimentIntensityAnalyzer()
+    total_score = 0
+    sector_report = {}
+
+    for sector, stocks in NIFTY_CONSTITUENTS.items():
+        s_score = 0
+        for ticker, weight in stocks.items():
+            try:
+                # Fetch recent news for the specific heavyweight
+                news = yf.Ticker(ticker).news
+                comp_sentiment = 0
+                for n in news[:2]: # Look at top 2 headlines
+                    text = n['title'].lower()
+                    score = analyzer.polarity_scores(text)['compound']
+                    
+                    # Apply Macro-Impact logic (The "Context Filter")
+                    for keyword, impact_map in MACRO_IMPACT_MAP.items():
+                        if keyword in text:
+                            score *= impact_map.get(sector, 1)
+                    comp_sentiment += score
+                
+                # Weight the sentiment by the stock's Nifty weightage
+                weighted_impact = (comp_sentiment / 2) * (weight / 100)
+                s_score += weighted_impact
+            except: continue
+        sector_report[sector] = s_score
+        total_score += s_score
+    
+    return total_score, sector_report
+
 def get_global_bias_text():
-    # US & Japan weighted analysis
     indices = {"^GSPC": 0.5, "^N225": 0.5}
     score = 0
     for ticker, weight in indices.items():
@@ -36,54 +84,49 @@ def fetch_nifty():
     df['MA20'] = df['Close'].rolling(20).mean()
     return df
 
-# --- 3. DASHBOARD UI (The FIX) ---
+# --- 3. DASHBOARD UI ---
 nifty = fetch_nifty()
 ltp = float(nifty['Close'].iloc[-1])
 bias_text, bias_color, bias_val = get_global_bias_text()
+n_sentiment, s_report = get_sectoral_sentiment()
 
 st.markdown(f"<h1 style='text-align: center; color: #00ffcc;'>NIFTY 50 AI TERMINAL</h1>", unsafe_allow_html=True)
 
-# TOP METRICS (Clearer Labels)
+# TOP METRICS
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("CURRENT NIFTY", f"{ltp:.2f}")
 m2.markdown(f"**GLOBAL BIAS** \n<span style='color:{bias_color}; font-size:20px;'>{bias_text}</span>", unsafe_allow_html=True)
-m3.metric("EXPIRY MODE", "TUESDAY HERO-ZERO" if now_ist.weekday() == 1 else "NORMAL")
+m3.metric("SENTIMENT SCORE", f"{n_sentiment:+.4f}")
 m4.metric("TIME (IST)", now_ist.strftime('%H:%M'))
 
 st.divider()
 
-# SIGNAL AREA (Must be above chart)
-sig_col, hero_col = st.columns([2, 1])
+# SIGNAL & SECTOR HEATMAP
+sig_col, stat_col = st.columns([2, 1])
 
 with sig_col:
     st.subheader("🎯 Active Trade Signal")
     
-    # 9:30 AM Logic
+    # 9:30 AM Logic + Sentiment Filter
     if now_ist.time() < time(9, 30):
-        st.info(f"⏳ **WAITING FOR 9:30 AM** - System is currently analyzing opening volatility. {30 - now_ist.minute if now_ist.minute < 30 else 0} mins left.")
+        st.info(f"⏳ **OPENING RANGE SCAN** - Locking entry at 09:30 AM IST.")
     else:
-        # Final Decision Logic
-        if bias_val > 0.001 and ltp > nifty['MA20'].iloc[-1]:
-            st.success(f"🚀 **BUY CALL (CE) SUGGESTION**\n\n**ENTRY:** {ltp:.2f} | **TARGET:** {ltp+40:.2f} | **SL:** {ltp-20:.2f}")
-            st.markdown("---")
-            st.caption("✅ Confidence: HIGH (Global Bias + Technical Trend match)")
-        elif bias_val < -0.001 and ltp < nifty['MA20'].iloc[-1]:
-            st.error(f"📉 **BUY PUT (PE) SUGGESTION**\n\n**ENTRY:** {ltp:.2f} | **TARGET:** {ltp-40:.2f} | **SL:** {ltp+20:.2f}")
-            st.markdown("---")
-            st.caption("✅ Confidence: HIGH (Global Bias + Technical Trend match)")
+        # CONFLUENCE LOGIC: Technicals + Global + Sectoral News
+        if bias_val > 0 and n_sentiment > 0.01 and ltp > nifty['MA20'].iloc[-1]:
+            st.success(f"🚀 **BUY CALL (CE)** | Entry: {ltp:.2f} | Confidence: HIGH")
+        elif bias_val < 0 and n_sentiment < -0.01 and ltp < nifty['MA20'].iloc[-1]:
+            st.error(f"📉 **BUY PUT (PE)** | Entry: {ltp:.2f} | Confidence: HIGH")
         else:
-            st.warning("⚖️ **STATUS: NEUTRAL** - Market is sideways or Global/Local signals are conflicting. Do not enter.")
+            st.warning("⚖️ **WAITING** - Signals are currently conflicting (e.g., Global Bullish but News Bearish).")
 
-with hero_col:
-    st.subheader("⚡ Hero-Zero (Tuesday)")
-    if now_ist.weekday() == 1 and now_ist.hour >= 13:
-        strike = int(round(ltp / 50) * 50)
-        st.error(f"🔥 ACTIVE: {strike} {'CE' if bias_val > 0 else 'PE'}")
-        st.write("Target: 3x Returns | SL: 0")
-    else:
-        st.write("🔴 Inactive (Only on Tuesdays after 1 PM)")
+with stat_col:
+    st.subheader("🏦 Sectoral Strength")
+    # Displays the impact of each sector based on your weightage
+    for sector, score in s_report.items():
+        color = "green" if score > 0 else "red" if score < 0 else "white"
+        st.markdown(f"**{sector}:** <span style='color:{color}'>{score:+.4f}</span>", unsafe_allow_html=True)
 
-# --- 4. CHART (Bottom) ---
+# --- 4. CHART ---
 st.divider()
 fig = go.Figure(data=[go.Candlestick(x=nifty.index, open=nifty['Open'], high=nifty['High'], low=nifty['Low'], close=nifty['Close'])])
 fig.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False, title="Live 5-Min Nifty Chart")
